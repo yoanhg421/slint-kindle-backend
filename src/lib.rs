@@ -375,6 +375,8 @@ pub fn wake_refresh() {
 }
 
 /// Draw a sleep screen image to the framebuffer and refresh.
+/// Fills white first and does a full refresh to clear ghosting,
+/// then draws the sleep image and refreshes again.
 pub fn show_sleep_screen(sleep_dir: &str) {
     use std::path::Path;
 
@@ -389,6 +391,12 @@ pub fn show_sleep_screen(sleep_dir: &str) {
     };
 
     set_screen_dimensions(fb.width, fb.height);
+
+    // Clear ghosting: fill white, full refresh, wait for it to complete,
+    // then draw the sleep image on a clean canvas.
+    fb.fill(0xff);
+    fb.refresh_full();
+    fb.wait_for_update_complete();
 
     let selected_name = SLEEP_IMAGE_NAME.lock().unwrap().clone();
     let bg_white = SLEEP_BG_WHITE.load(Ordering::Relaxed);
