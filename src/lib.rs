@@ -303,6 +303,11 @@ pub(crate) static REQUEST_FULL_REFRESH: AtomicBool = AtomicBool::new(false);
 /// to force a full re-render (the framebuffer still has the sleep image).
 pub(crate) static WOKE_FROM_SUSPEND: AtomicBool = AtomicBool::new(false);
 
+/// Set while the sleep screen is displayed. The event loop checks this
+/// to skip draw_if_needed, preventing the app from redrawing over the
+/// sleep screen before suspend takes effect.
+pub(crate) static SUPPRESS_DRAW: AtomicBool = AtomicBool::new(false);
+
 /// Pre-rendered sleep screen stored as raw framebuffer bytes.
 static SLEEP_SCREEN_CACHE: Mutex<Option<SleepScreenCache>> = Mutex::new(None);
 
@@ -370,6 +375,7 @@ pub fn suspend() {
 
 /// Force the app to re-render and flash the screen to clear the sleep image.
 pub fn wake_refresh() {
+    SUPPRESS_DRAW.store(false, Ordering::Relaxed);
     request_full_refresh();
     WOKE_FROM_SUSPEND.store(true, Ordering::Relaxed);
 }
@@ -414,6 +420,7 @@ pub fn show_sleep_screen(sleep_dir: &str) {
                 }
                 fb.refresh_full();
                 fb.wait_for_update_complete();
+                SUPPRESS_DRAW.store(true, Ordering::Relaxed);
                 log::info!("[suwayomi] sleep: displayed cached image in {:.0}ms", start.elapsed().as_millis());
                 return;
             } else {
@@ -470,6 +477,7 @@ pub fn show_sleep_screen(sleep_dir: &str) {
 
     fb.refresh_full();
     fb.wait_for_update_complete();
+    SUPPRESS_DRAW.store(true, Ordering::Relaxed);
     log::info!("[suwayomi] sleep: displayed in {:.0}ms", start.elapsed().as_millis());
 }
 

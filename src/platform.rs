@@ -14,7 +14,7 @@ use crate::power::{arm_wakealarm, find_wakealarm, suspend_to_mem};
 use crate::touch::TouchInput;
 use crate::buttons::ButtonInput;
 use crate::wakeup::{self, KindleEventLoopProxy, Queue, Wakeup};
-use crate::{OnWakeCallback, PageTurnCallback, WakeSchedule, REQUEST_FULL_REFRESH, WOKE_FROM_SUSPEND, get_rotation, get_render_offset};
+use crate::{OnWakeCallback, PageTurnCallback, WakeSchedule, REQUEST_FULL_REFRESH, WOKE_FROM_SUSPEND, SUPPRESS_DRAW, get_rotation, get_render_offset};
 
 // Animations get redrawn at most ~30 fps. E-ink can't keep up with anything
 // faster, so quicker wakes would just waste battery.
@@ -311,7 +311,10 @@ impl Platform for KindlePlatform {
             }
 
             let mut did_draw = false;
-            self.window.draw_if_needed(|renderer| {
+            // Skip rendering while the sleep screen is displayed, so the
+            // app doesn't redraw over it before suspend takes effect.
+            if !SUPPRESS_DRAW.load(Ordering::Relaxed) {
+                self.window.draw_if_needed(|renderer| {
                 did_draw = true;
                 let dirty = renderer.render(&mut rgb_buffer, width);
                 let origin = dirty.bounding_box_origin();
@@ -374,12 +377,13 @@ impl Platform for KindlePlatform {
                     frame_buffer.refresh_region(fb_origin, fb_size);
                 }
             });
+            }
 
             // If a full refresh was requested or rotation changed, force a
             // full reblit. draw_if_needed only writes the DIRTY region to the
             // framebuffer — the rest would keep stale content (e.g. the sleep
             // image after wake). full_reblit writes the entire rgb_buffer.
-            if full_refresh || rotation_changed {
+            if (full_refresh || rotation_changed) && !SUPPRESS_DRAW.load(Ordering::Relaxed) {
                 full_reblit(&mut frame_buffer, &rgb_buffer, &mut gray_buffer,
                     black_and_white, render_rotation, fb_w, fb_h, render_w, render_h);
             }
