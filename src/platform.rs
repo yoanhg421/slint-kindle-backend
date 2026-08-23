@@ -12,8 +12,9 @@ use slint::platform::{EventLoopProxy, Platform, PlatformError, WindowAdapter};
 use crate::framebuffer::Framebuffer;
 use crate::power::{arm_wakealarm, find_wakealarm, suspend_to_mem};
 use crate::touch::TouchInput;
+use crate::buttons::ButtonInput;
 use crate::wakeup::{self, KindleEventLoopProxy, Queue, Wakeup};
-use crate::{OnWakeCallback, WakeSchedule, REQUEST_FULL_REFRESH, WOKE_FROM_SUSPEND, get_rotation, get_render_offset};
+use crate::{OnWakeCallback, PageTurnCallback, WakeSchedule, REQUEST_FULL_REFRESH, WOKE_FROM_SUSPEND, get_rotation, get_render_offset};
 
 // Animations get redrawn at most ~30 fps. E-ink can't keep up with anything
 // faster, so quicker wakes would just waste battery.
@@ -27,6 +28,7 @@ pub(crate) struct KindlePlatform {
     quit_flag: Arc<AtomicBool>,
     pub(crate) wake_schedule: Arc<Mutex<Option<WakeSchedule>>>,
     pub(crate) on_wake: OnWakeCallback,
+    pub(crate) on_page_turn: PageTurnCallback,
     black_and_white: Arc<AtomicBool>,
     scale_factor: f32,
 }
@@ -35,6 +37,7 @@ impl KindlePlatform {
     pub(crate) fn new(
         wake_schedule: Arc<Mutex<Option<WakeSchedule>>>,
         on_wake: OnWakeCallback,
+        on_page_turn: PageTurnCallback,
         black_and_white: Arc<AtomicBool>,
         scale_factor: f32,
     ) -> std::io::Result<Self> {
@@ -48,6 +51,7 @@ impl KindlePlatform {
             quit_flag: Arc::new(AtomicBool::new(false)),
             wake_schedule,
             on_wake,
+            on_page_turn,
             black_and_white,
             scale_factor,
         })
@@ -148,6 +152,13 @@ impl Platform for KindlePlatform {
         let mut touch_input = TouchInput::open(frame_buffer.width, frame_buffer.height, sf)
             .map_err(|e| PlatformError::Other(format!("failed to open touch input: {e}")))?;
 
+        // Open physical button input (PagePress, page-turn buttons).
+        // Optional — not all Kindle models have these.
+        let mut button_input = ButtonInput::open();
+        if button_input.is_some() {
+            log::info!("[kindle] button input opened successfully");
+        }
+
         frame_buffer.fill(0xff);
         frame_buffer.refresh_full();
 
@@ -186,9 +197,11 @@ impl Platform for KindlePlatform {
                 (false, None) => -1,
             };
 
-            // [0] - touch events file descriptor
+            // Build poll file descriptors:
+            // [0] - touch events
             // [1] - wakeup pipe for userland application threads
-            let mut file_descriptors = [
+            // [2..] - button input devices (page-turn buttons, PagePress)
+            let mut file_descriptors = vec![
                 libc::pollfd {
                     fd: touch_input.fd(),
                     events: libc::POLLIN,
@@ -200,10 +213,18 @@ impl Platform for KindlePlatform {
                     revents: 0,
                 },
             ];
+            if let Some(ref btn) = button_input {
+                for &fd in btn.fds() {
+                    file_descriptors.push(libc::pollfd {
+                        fd,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    });
+                }
+            }
 
             // Block until an fd has activity or the timeout expires.
             // Retry on EINTR, bail on any other error.
-            // SAFETY: fds is a valid 2-element array while poll runs.
             let poll_result = unsafe {
                 libc::poll(
                     file_descriptors.as_mut_ptr(),
@@ -248,13 +269,23 @@ impl Platform for KindlePlatform {
                 break;
             }
 
-            // Touch activity counts as user interaction, so it resets the
-            // suspend countdown
+            // Touch or button activity counts as user interaction, so it
+            // resets the suspend countdown
             if file_descriptors[0].revents & libc::POLLIN != 0 {
                 last_interaction = Instant::now();
             }
+            // Check button fds (index 2+) for activity
+            if file_descriptors.len() > 2 {
+                let btn_active = file_descriptors[2..].iter().any(|fd| fd.revents & libc::POLLIN != 0);
+                if btn_active {
+                    last_interaction = Instant::now();
+                }
+            }
 
             touch_input.poll(&self.window);
+            if let Some(ref mut btn) = button_input {
+                btn.poll(&self.on_page_turn);
+            }
             slint::platform::update_timers_and_animations();
 
             let black_and_white = self.black_and_white.load(Ordering::Relaxed);

@@ -17,6 +17,7 @@
 //! }
 //! ```
 
+mod buttons;
 mod framebuffer;
 mod platform;
 mod power;
@@ -34,6 +35,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub(crate) type OnWakeCallback = Rc<RefCell<Option<Box<dyn FnMut()>>>>;
+pub(crate) type PageTurnCallback = Rc<RefCell<Option<Box<dyn FnMut(PageTurnDirection)>>>>;
+
+/// Direction of a physical page-turn button press.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageTurnDirection {
+    Prev,
+    Next,
+}
 
 /// How often to wake from suspend-to-RAM and how long to stay awake afterwards.
 ///
@@ -66,6 +75,7 @@ pub struct KindleBackend<State = NoSchedule> {
     window: Rc<MinimalSoftwareWindow>,
     wake_schedule: Arc<Mutex<Option<WakeSchedule>>>,
     on_wake: OnWakeCallback,
+    on_page_turn: PageTurnCallback,
     black_and_white: Arc<AtomicBool>,
     _state: PhantomData<State>,
 }
@@ -103,6 +113,7 @@ impl<State> KindleBackend<State> {
             window: self.window,
             wake_schedule: self.wake_schedule,
             on_wake: self.on_wake,
+            on_page_turn: self.on_page_turn,
             black_and_white: self.black_and_white,
             _state: PhantomData,
         }
@@ -157,6 +168,18 @@ impl KindleBackend<Scheduled> {
     }
 }
 
+impl<State> KindleBackend<State> {
+    /// Set a callback for physical page-turn button presses (PagePress).
+    ///
+    /// Fires on the event-loop (UI) thread when a page-turn button is pressed.
+    /// The callback receives `PageTurnDirection::Prev` or `PageTurnDirection::Next`.
+    /// This bypasses Slint's keyboard focus system, so it works even before
+    /// the user touches the screen.
+    pub fn on_page_turn<F: FnMut(PageTurnDirection) + 'static>(&self, callback: F) {
+        *self.on_page_turn.borrow_mut() = Some(Box::new(callback));
+    }
+}
+
 /// Set up the Kindle backend and use `font_data` as the default font.
 ///
 /// You **must** pass a font. The Kindle doesn't ship any usable system fonts,
@@ -193,10 +216,12 @@ pub fn install_with_scale(
 
     let wake_schedule = Arc::new(Mutex::new(None));
     let on_wake: OnWakeCallback = Rc::new(RefCell::new(None));
+    let on_page_turn: PageTurnCallback = Rc::new(RefCell::new(None));
     let black_and_white = Arc::new(AtomicBool::new(false));
     let platform = KindlePlatform::new(
         wake_schedule.clone(),
         on_wake.clone(),
+        on_page_turn.clone(),
         black_and_white.clone(),
         scale_factor,
     )
@@ -208,6 +233,7 @@ pub fn install_with_scale(
         window,
         wake_schedule,
         on_wake,
+        on_page_turn,
         black_and_white,
         _state: PhantomData,
     })
