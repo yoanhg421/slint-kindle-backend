@@ -196,6 +196,7 @@ pub(super) struct UpdateMarkerData {
     pub(super) collision_test: u32,
 }
 
+pub(super) const WAVEFORM_MODE_INIT: u32 = 0; // Screen goes to white (clears all ghosting)
 pub(super) const WAVEFORM_MODE_GC16: u32 = 2; // Full 16-level grayscale refresh (slow, high quality)
 pub(super) const WAVEFORM_MODE_AUTO: u32 = 257; // Let the driver pick the best waveform
 pub(super) const UPDATE_MODE_PARTIAL: u32 = 0; // Only redraw the dirty region

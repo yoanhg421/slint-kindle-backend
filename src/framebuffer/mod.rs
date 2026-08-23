@@ -9,7 +9,7 @@ use ffi::{
     MXCFB_SEND_UPDATE_MTK, MXCFB_SEND_UPDATE_REX, MXCFB_SEND_UPDATE_ZELDA,
     MXCFB_WAIT_FOR_UPDATE_COMPLETE, TEMP_USE_AMBIENT, UPDATE_MODE_FULL, UPDATE_MODE_PARTIAL,
     UpdateMarkerData, UpdateRect, UpdateRequest, UpdateRequestMtk, UpdateRequestRex,
-    UpdateRequestZelda, WAVEFORM_MODE_AUTO, WAVEFORM_MODE_GC16,
+    UpdateRequestZelda, WAVEFORM_MODE_AUTO, WAVEFORM_MODE_GC16, WAVEFORM_MODE_INIT,
 };
 
 /// Which MXCFB update ioctl this kernel accepts, varies with the Kindle model
@@ -289,6 +289,21 @@ impl Framebuffer {
                 height: self.height,
             },
             WAVEFORM_MODE_GC16,
+            UPDATE_MODE_FULL,
+        );
+    }
+
+    /// Full-screen INIT refresh — forces the panel to white, clearing all ghosting.
+    /// Slower than GC16 but produces a completely clean slate.
+    pub(crate) fn refresh_clear(&self) {
+        self.send_update(
+            UpdateRect {
+                top: 0,
+                left: 0,
+                width: self.width,
+                height: self.height,
+            },
+            WAVEFORM_MODE_INIT,
             UPDATE_MODE_FULL,
         );
     }

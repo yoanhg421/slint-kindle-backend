@@ -392,10 +392,10 @@ pub fn show_sleep_screen(sleep_dir: &str) {
 
     set_screen_dimensions(fb.width, fb.height);
 
-    // Clear ghosting: fill white, full refresh, wait for it to complete,
-    // then draw the sleep image on a clean canvas.
+    // Clear ghosting: fill white, INIT refresh (forces panel to white),
+    // wait for it to complete, then draw the sleep image on a clean canvas.
     fb.fill(0xff);
-    fb.refresh_full();
+    fb.refresh_clear();
     fb.wait_for_update_complete();
 
     let selected_name = SLEEP_IMAGE_NAME.lock().unwrap().clone();
