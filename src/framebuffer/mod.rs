@@ -9,7 +9,7 @@ use ffi::{
     MXCFB_SEND_UPDATE_MTK, MXCFB_SEND_UPDATE_REX, MXCFB_SEND_UPDATE_ZELDA,
     MXCFB_WAIT_FOR_UPDATE_COMPLETE, TEMP_USE_AMBIENT, UPDATE_MODE_FULL, UPDATE_MODE_PARTIAL,
     UpdateMarkerData, UpdateRect, UpdateRequest, UpdateRequestMtk, UpdateRequestRex,
-    UpdateRequestZelda, WAVEFORM_MODE_AUTO, WAVEFORM_MODE_DU, WAVEFORM_MODE_GC16, WAVEFORM_MODE_GC16_FAST, WAVEFORM_MODE_INIT, WAVEFORM_MODE_REAGL,
+    UpdateRequestZelda, WAVEFORM_MODE_AUTO, WAVEFORM_MODE_DU, WAVEFORM_MODE_GC16, WAVEFORM_MODE_GC16_FAST, WAVEFORM_MODE_INIT,
 };
 
 /// Which MXCFB update ioctl this kernel accepts, varies with the Kindle model
@@ -50,9 +50,6 @@ pub(crate) struct Framebuffer {
     /// The update ioctl variant this kernel accepts, cached after the first
     /// successful refresh. `None` until then.
     update_variant: Cell<Option<UpdateVariant>>,
-    /// Whether the kernel accepts REAGL waveform (ghost compensation).
-    /// `None` = not yet tested, `Some(true/false)` = tested.
-    reagl_supported: Cell<Option<bool>>,
     /// Incrementing update marker for each EPDC update. The kernel uses
     /// this to track overlapping updates — reusing the same marker for
     /// multiple updates can cause collisions and crashes.
@@ -148,7 +145,6 @@ impl Framebuffer {
             height,
             stride,
             update_variant: Cell::new(None),
-            reagl_supported: Cell::new(None),
             next_marker: Cell::new(1),
         })
     }
@@ -187,35 +183,23 @@ impl Framebuffer {
     /// On the first call we probe which update ioctl the kernel accepts and
     /// cache it, so later frames issue exactly one ioctl instead of retrying a
     /// known-failing one every refresh.
-    fn send_update(&self, region: UpdateRect, waveform: u32, mode: u32) -> bool {
+    fn send_update(&self, region: UpdateRect, waveform: u32, mode: u32) {
         match self.update_variant.get() {
             Some(variant) => {
-                self.send_update_variant(variant, region, waveform, mode)
+                self.send_update_variant(variant, region, waveform, mode);
             }
             None => {
-                // Try the requested waveform with each ioctl variant.
                 let accepted = UpdateVariant::PROBE_ORDER
                     .into_iter()
                     .find(|&variant| self.send_update_variant(variant, region, waveform, mode));
-                if let Some(variant) = accepted {
-                    self.update_variant.set(Some(variant));
-                    return true;
-                }
-                // Requested waveform might be unsupported (e.g. REAGL on
-                // older devices). Retry with AUTO to find the ioctl variant.
-                let accepted = UpdateVariant::PROBE_ORDER
-                    .into_iter()
-                    .find(|&variant| self.send_update_variant(variant, region, WAVEFORM_MODE_AUTO, mode));
-                if let Some(variant) = accepted {
-                    self.update_variant.set(Some(variant));
-                } else {
+                if accepted.is_none() {
                     log::error!(
                         "EPDC refresh failed: no known MXCFB_SEND_UPDATE variant \
                          was accepted; the screen will not update"
                     );
-                    self.update_variant.set(Some(UpdateVariant::Unsupported));
                 }
-                accepted.is_some()
+                self.update_variant
+                    .set(Some(accepted.unwrap_or(UpdateVariant::Unsupported)));
             }
         }
     }
@@ -260,11 +244,9 @@ impl Framebuffer {
     /// Issue the legacy `MXCFB_SEND_UPDATE` (72-byte struct). Returns whether the
     /// ioctl succeeded.
     fn send_update_legacy(&self, region: UpdateRect, waveform: u32, mode: u32) -> bool {
-        // Match KOReader's refresh_k51: when using REAGL, set hist fields
-        // to REAGL too. Otherwise use DU for bw and GC16_FAST for gray.
-        let (hist_bw, hist_gray) = if waveform == WAVEFORM_MODE_REAGL {
-            (WAVEFORM_MODE_REAGL, WAVEFORM_MODE_REAGL)
-        } else if waveform == WAVEFORM_MODE_GC16 {
+        // Match KOReader's refresh_k51: set hist_bw/hist_gray fields
+        // appropriately for the waveform mode.
+        let (hist_bw, hist_gray) = if waveform == WAVEFORM_MODE_GC16 {
             (WAVEFORM_MODE_DU, WAVEFORM_MODE_GC16)
         } else {
             (WAVEFORM_MODE_DU, WAVEFORM_MODE_GC16_FAST)
@@ -380,34 +362,16 @@ impl Framebuffer {
         if size.width == 0 || size.height == 0 {
             return;
         }
-        let region = UpdateRect {
-            top: origin.y as u32,
-            left: origin.x as u32,
-            width: size.width,
-            height: size.height,
-        };
-        // Use REAGL (ghost compensation waveform) on Carta+ panels
-        // (Voyage, PW2+, Oasis). It does partial refreshes with built-in
-        // ghost compensation — much less ghosting than AUTO on older panels.
-        // The Voyage uses the Legacy ioctl (MXCFB_SEND_UPDATE, 72-byte struct).
-        // KOReader confirms the Voyage supports REAGL (isREAGL = yes).
-        // Fall back to AUTO if the kernel rejects REAGL.
-        let waveform = match self.reagl_supported.get() {
-            None => {
-                let ok = self.send_update(region, WAVEFORM_MODE_REAGL, UPDATE_MODE_PARTIAL);
-                self.reagl_supported.set(Some(ok));
-                if ok {
-                    log::info!("[framebuffer] REAGL waveform supported, using for partial refreshes");
-                } else {
-                    log::info!("[framebuffer] REAGL waveform not supported, using AUTO");
-                    // send_update already fell back to AUTO during probing
-                }
-                return;
-            }
-            Some(true) => WAVEFORM_MODE_REAGL,
-            Some(false) => WAVEFORM_MODE_AUTO,
-        };
-        self.send_update(region, waveform, UPDATE_MODE_PARTIAL);
+        self.send_update(
+            UpdateRect {
+                top: origin.y as u32,
+                left: origin.x as u32,
+                width: size.width,
+                height: size.height,
+            },
+            WAVEFORM_MODE_AUTO,
+            UPDATE_MODE_PARTIAL,
+        );
     }
 }
 
