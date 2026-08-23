@@ -197,7 +197,10 @@ pub(super) struct UpdateMarkerData {
 }
 
 pub(super) const WAVEFORM_MODE_INIT: u32 = 0; // Screen goes to white (clears all ghosting)
+pub(super) const WAVEFORM_MODE_DU: u32 = 1; // Direct update (fast, monochrome only)
 pub(super) const WAVEFORM_MODE_GC16: u32 = 2; // Full 16-level grayscale refresh (slow, high quality)
+pub(super) const WAVEFORM_MODE_GC16_FAST: u32 = 3; // Medium fidelity grayscale
+pub(super) const WAVEFORM_MODE_REAGL: u32 = 8; // Ghost compensation waveform (Carta+ partial refresh)
 pub(super) const WAVEFORM_MODE_AUTO: u32 = 257; // Let the driver pick the best waveform
 pub(super) const UPDATE_MODE_PARTIAL: u32 = 0; // Only redraw the dirty region
 pub(super) const UPDATE_MODE_FULL: u32 = 1; // Flash the whole screen (clears ghosting)

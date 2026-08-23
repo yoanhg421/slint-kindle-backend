@@ -9,7 +9,7 @@ use ffi::{
     MXCFB_SEND_UPDATE_MTK, MXCFB_SEND_UPDATE_REX, MXCFB_SEND_UPDATE_ZELDA,
     MXCFB_WAIT_FOR_UPDATE_COMPLETE, TEMP_USE_AMBIENT, UPDATE_MODE_FULL, UPDATE_MODE_PARTIAL,
     UpdateMarkerData, UpdateRect, UpdateRequest, UpdateRequestMtk, UpdateRequestRex,
-    UpdateRequestZelda, WAVEFORM_MODE_AUTO, WAVEFORM_MODE_GC16, WAVEFORM_MODE_INIT,
+    UpdateRequestZelda, WAVEFORM_MODE_AUTO, WAVEFORM_MODE_DU, WAVEFORM_MODE_GC16, WAVEFORM_MODE_GC16_FAST, WAVEFORM_MODE_INIT, WAVEFORM_MODE_REAGL,
 };
 
 /// Which MXCFB update ioctl this kernel accepts, varies with the Kindle model
@@ -50,6 +50,13 @@ pub(crate) struct Framebuffer {
     /// The update ioctl variant this kernel accepts, cached after the first
     /// successful refresh. `None` until then.
     update_variant: Cell<Option<UpdateVariant>>,
+    /// Whether the kernel accepts REAGL waveform (ghost compensation).
+    /// `None` = not yet tested, `Some(true/false)` = tested.
+    reagl_supported: Cell<Option<bool>>,
+    /// Incrementing update marker for each EPDC update. The kernel uses
+    /// this to track overlapping updates — reusing the same marker for
+    /// multiple updates can cause collisions and crashes.
+    next_marker: Cell<u32>,
 }
 
 // SAFETY: The mmap is process-wide and we only access it from the event loop thread.
@@ -141,6 +148,8 @@ impl Framebuffer {
             height,
             stride,
             update_variant: Cell::new(None),
+            reagl_supported: Cell::new(None),
+            next_marker: Cell::new(1),
         })
     }
 
@@ -178,23 +187,35 @@ impl Framebuffer {
     /// On the first call we probe which update ioctl the kernel accepts and
     /// cache it, so later frames issue exactly one ioctl instead of retrying a
     /// known-failing one every refresh.
-    fn send_update(&self, region: UpdateRect, waveform: u32, mode: u32) {
+    fn send_update(&self, region: UpdateRect, waveform: u32, mode: u32) -> bool {
         match self.update_variant.get() {
             Some(variant) => {
-                self.send_update_variant(variant, region, waveform, mode);
+                self.send_update_variant(variant, region, waveform, mode)
             }
             None => {
+                // Try the requested waveform with each ioctl variant.
                 let accepted = UpdateVariant::PROBE_ORDER
                     .into_iter()
                     .find(|&variant| self.send_update_variant(variant, region, waveform, mode));
-                if accepted.is_none() {
+                if let Some(variant) = accepted {
+                    self.update_variant.set(Some(variant));
+                    return true;
+                }
+                // Requested waveform might be unsupported (e.g. REAGL on
+                // older devices). Retry with AUTO to find the ioctl variant.
+                let accepted = UpdateVariant::PROBE_ORDER
+                    .into_iter()
+                    .find(|&variant| self.send_update_variant(variant, region, WAVEFORM_MODE_AUTO, mode));
+                if let Some(variant) = accepted {
+                    self.update_variant.set(Some(variant));
+                } else {
                     log::error!(
                         "EPDC refresh failed: no known MXCFB_SEND_UPDATE variant \
                          was accepted; the screen will not update"
                     );
+                    self.update_variant.set(Some(UpdateVariant::Unsupported));
                 }
-                self.update_variant
-                    .set(Some(accepted.unwrap_or(UpdateVariant::Unsupported)));
+                accepted.is_some()
             }
         }
     }
@@ -223,14 +244,38 @@ impl Framebuffer {
         unsafe { libc::ioctl(self.file.as_raw_fd(), request as _, update as *const _) != -1 }
     }
 
+    /// Get the next incrementing update marker (1-based, wraps at u32::MAX).
+    fn next_marker(&self) -> u32 {
+        let marker = self.next_marker.get();
+        self.next_marker.set(marker.wrapping_add(1).max(1));
+        marker
+    }
+
+    /// Get the last marker that was submitted to the EPDC.
+    fn last_marker(&self) -> u32 {
+        let marker = self.next_marker.get();
+        if marker <= 1 { 1 } else { marker - 1 }
+    }
+
     /// Issue the legacy `MXCFB_SEND_UPDATE` (72-byte struct). Returns whether the
     /// ioctl succeeded.
     fn send_update_legacy(&self, region: UpdateRect, waveform: u32, mode: u32) -> bool {
+        // Match KOReader's refresh_k51: when using REAGL, set hist fields
+        // to REAGL too. Otherwise use DU for bw and GC16_FAST for gray.
+        let (hist_bw, hist_gray) = if waveform == WAVEFORM_MODE_REAGL {
+            (WAVEFORM_MODE_REAGL, WAVEFORM_MODE_REAGL)
+        } else if waveform == WAVEFORM_MODE_GC16 {
+            (WAVEFORM_MODE_DU, WAVEFORM_MODE_GC16)
+        } else {
+            (WAVEFORM_MODE_DU, WAVEFORM_MODE_GC16_FAST)
+        };
         let update = UpdateRequest {
             update_region: region,
             waveform_mode: waveform,
             update_mode: mode,
-            update_marker: 1,
+            update_marker: self.next_marker(),
+            previous_bw_waveform_mode: hist_bw,
+            previous_gray_waveform_mode: hist_gray,
             temperature: TEMP_USE_AMBIENT,
             ..Default::default()
         };
@@ -244,7 +289,7 @@ impl Framebuffer {
             update_region: region,
             waveform_mode: waveform,
             update_mode: mode,
-            update_marker: 1,
+            update_marker: self.next_marker(),
             temperature: TEMP_USE_AMBIENT,
             ..Default::default()
         };
@@ -258,7 +303,7 @@ impl Framebuffer {
             update_region: region,
             waveform_mode: waveform,
             update_mode: mode,
-            update_marker: 1,
+            update_marker: self.next_marker(),
             temperature: TEMP_USE_AMBIENT,
             ..Default::default()
         };
@@ -272,7 +317,7 @@ impl Framebuffer {
             update_region: region,
             waveform_mode: waveform,
             update_mode: mode,
-            update_marker: 1,
+            update_marker: self.next_marker(),
             temperature: TEMP_USE_AMBIENT,
             ..Default::default()
         };
@@ -314,7 +359,7 @@ impl Framebuffer {
     /// Best-effort: a failing ioctl is ignored, since this is purely defensive.
     pub(crate) fn wait_for_update_complete(&self) {
         let mut marker = UpdateMarkerData {
-            update_marker: 1,
+            update_marker: self.last_marker(),
             collision_test: 0,
         };
         unsafe {
@@ -335,16 +380,34 @@ impl Framebuffer {
         if size.width == 0 || size.height == 0 {
             return;
         }
-        self.send_update(
-            UpdateRect {
-                top: origin.y as u32,
-                left: origin.x as u32,
-                width: size.width,
-                height: size.height,
-            },
-            WAVEFORM_MODE_AUTO,
-            UPDATE_MODE_PARTIAL,
-        );
+        let region = UpdateRect {
+            top: origin.y as u32,
+            left: origin.x as u32,
+            width: size.width,
+            height: size.height,
+        };
+        // Use REAGL (ghost compensation waveform) on Carta+ panels
+        // (Voyage, PW2+, Oasis). It does partial refreshes with built-in
+        // ghost compensation — much less ghosting than AUTO on older panels.
+        // The Voyage uses the Legacy ioctl (MXCFB_SEND_UPDATE, 72-byte struct).
+        // KOReader confirms the Voyage supports REAGL (isREAGL = yes).
+        // Fall back to AUTO if the kernel rejects REAGL.
+        let waveform = match self.reagl_supported.get() {
+            None => {
+                let ok = self.send_update(region, WAVEFORM_MODE_REAGL, UPDATE_MODE_PARTIAL);
+                self.reagl_supported.set(Some(ok));
+                if ok {
+                    log::info!("[framebuffer] REAGL waveform supported, using for partial refreshes");
+                } else {
+                    log::info!("[framebuffer] REAGL waveform not supported, using AUTO");
+                    // send_update already fell back to AUTO during probing
+                }
+                return;
+            }
+            Some(true) => WAVEFORM_MODE_REAGL,
+            Some(false) => WAVEFORM_MODE_AUTO,
+        };
+        self.send_update(region, waveform, UPDATE_MODE_PARTIAL);
     }
 }
 
