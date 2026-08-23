@@ -159,6 +159,9 @@ impl ButtonInput {
                     let is_prev = KEY_PREV_CODES.contains(&event.code);
                     let is_next = KEY_NEXT_CODES.contains(&event.code);
                     if is_prev || is_next {
+                        // Reset the idle activity timer so the app doesn't
+                        // sleep while the user is reading via page-turn buttons.
+                        crate::touch_activity();
                         // On Oasis, PAGEUP (top) = next, PAGEDOWN (bottom) = prev.
                         // On other Kindles, PAGEUP = prev, PAGEDOWN = next.
                         let direction = if is_prev {
